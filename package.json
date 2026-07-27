@@ -1,0 +1,21 @@
+{
+  "name": "job-scraper-by-azya",
+  "version": "1.0.0",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "verify-sources": "node scripts/verify-sources.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "n8n-based automated job search, career-ops-style evaluation, and Telegram alerting pipeline.",
+  "dependencies": {
+    "js-yaml": "^5.2.2"
+  }
+}
