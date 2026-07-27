@@ -92,18 +92,42 @@ fi
 node "$REPO_ROOT/prompts/build-prompt.mjs" "$PROFILE_PATH" > /tmp/system_prompt.txt
 create_or_update_secret eval-system-prompt "$(cat /tmp/system_prompt.txt)"
 
-echo "== Granting Cloud Run's runtime service account access to the secrets =="
-# Cloud Run pulls secret values as the project's default compute service
-# account at deploy time — it has no Secret Manager access by default, so
-# the deploy fails with "Permission denied on secret" until this is granted.
+echo "== Generating a stable N8N_ENCRYPTION_KEY (once) =="
+# n8n uses this to encrypt stored credentials. If it's regenerated on every
+# deploy (the default when unset), previously saved credentials become
+# undecryptable after any redeploy/restart. Generate it once and keep it
+# stable in Secret Manager across every future run of this script.
+if ! gcloud secrets describe n8n-encryption-key >/dev/null 2>&1; then
+  ENCRYPTION_KEY=$(openssl rand -hex 32)
+  echo -n "$ENCRYPTION_KEY" | gcloud secrets create n8n-encryption-key --data-file=-
+else
+  echo "(n8n-encryption-key already exists, leaving it untouched)"
+fi
+
+echo "== Granting Cloud Run's runtime service account least-privilege access =="
+# Cloud Run pulls secrets and connects to Cloud SQL as the project's default
+# compute service account at deploy time — it has neither permission by
+# default. Secret access is granted per-secret (not project-wide) so this
+# service account can only ever read the secrets this pipeline actually
+# uses, not any other secret that later gets added to the project.
 PROJECT_NUMBER=$(gcloud projects describe "$GCP_PROJECT_ID" --format='value(projectNumber)')
 COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+for secret in db-password eval-system-prompt n8n-encryption-key; do
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --member="serviceAccount:$COMPUTE_SA" \
+    --role="roles/secretmanager.secretAccessor" \
+    --condition=None >/dev/null
+done
+# Required for n8n to open the Cloud SQL Unix socket connection at all —
+# without this, the container fails its DB connection on startup, crashes
+# in a retry loop, and never opens the HTTP port in time (surfaces as a
+# generic Cloud Run "failed to start and listen on the port" deploy error).
 gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --member="serviceAccount:$COMPUTE_SA" \
-  --role="roles/secretmanager.secretAccessor" \
+  --role="roles/cloudsql.client" \
   --condition=None >/dev/null
 
-echo "== Deploying n8n to Cloud Run =="
+echo "== Deploying n8n to Cloud Run (pass 1: get the assigned URL) =="
 gcloud run deploy job-pipeline-n8n \
   --image=docker.io/n8nio/n8n:latest \
   --region="$REGION" \
@@ -113,10 +137,21 @@ gcloud run deploy job-pipeline-n8n \
   --max-instances=1 \
   --port=5678 \
   --add-cloudsql-instances="$DB_CONNECTION_NAME" \
-  --set-env-vars="DB_TYPE=postgresdb,DB_POSTGRESDB_HOST=/cloudsql/$DB_CONNECTION_NAME,DB_POSTGRESDB_DATABASE=job_pipeline,DB_POSTGRESDB_USER=postgres,DB_POSTGRESDB_PORT=5432" \
-  --set-secrets="DB_POSTGRESDB_PASSWORD=db-password:latest,EVAL_SYSTEM_PROMPT=eval-system-prompt:latest"
+  --set-env-vars="DB_TYPE=postgresdb,DB_POSTGRESDB_HOST=/cloudsql/$DB_CONNECTION_NAME,DB_POSTGRESDB_DATABASE=job_pipeline,DB_POSTGRESDB_USER=postgres,DB_POSTGRESDB_PORT=5432,N8N_ENDPOINT_HEALTH=health" \
+  --set-secrets="DB_POSTGRESDB_PASSWORD=db-password:latest,EVAL_SYSTEM_PROMPT=eval-system-prompt:latest,N8N_ENCRYPTION_KEY=n8n-encryption-key:latest"
 
 N8N_URL=$(gcloud run services describe job-pipeline-n8n --region="$REGION" --format="value(status.url)")
+N8N_HOSTNAME=$(echo "$N8N_URL" | sed -E 's#^https?://##')
+
+echo "== Deploying n8n to Cloud Run (pass 2: set N8N_HOST/WEBHOOK_URL now that the URL is known) =="
+# n8n needs to know its own externally-reachable URL to construct correct
+# webhook URLs and editor asset links — without this, webhooks register
+# against the wrong address and the UI can misbehave (the well-known
+# Cloud-Run-specific "deploys fine but shows Cannot GET /" symptom).
+gcloud run services update job-pipeline-n8n \
+  --region="$REGION" \
+  --update-env-vars="N8N_HOST=$N8N_HOSTNAME,N8N_PROTOCOL=https,WEBHOOK_URL=$N8N_URL/"
+
 echo "n8n deployed at: $N8N_URL (import n8n/workflows/*.json via the n8n UI, then set up Postgres/Telegram/Anthropic/Adzuna credentials pointing at the secrets above)"
 
 echo "== Creating the Cloud Scheduler job (the actual 6-hour trigger) =="
@@ -143,7 +178,14 @@ echo ""
 echo "Done. Remaining manual steps (see README.md):"
 echo "  1. Load $REPO_ROOT/sql/schema.sql and sql/seed.sql into the Cloud SQL database."
 echo "  2. Open the n8n UI at $N8N_URL, import $REPO_ROOT/n8n/workflows/*.json."
-echo "  3. Create n8n credentials: Postgres, Anthropic API (HTTP header auth), Telegram, Adzuna."
+echo "  3. Create n8n credentials (Postgres, Anthropic API header auth, Telegram, Adzuna) in the"
+echo "     n8n UI itself — n8n encrypts and stores these in its own database, it does NOT read"
+echo "     them from Secret Manager env vars. Retrieve each value to paste in with:"
+echo "       gcloud secrets versions access latest --secret=anthropic-api-key"
+echo "       gcloud secrets versions access latest --secret=telegram-bot-token"
+echo "       gcloud secrets versions access latest --secret=telegram-chat-id"
+echo "       gcloud secrets versions access latest --secret=adzuna-app-id"
+echo "       gcloud secrets versions access latest --secret=adzuna-app-key"
 echo "  4. Activate the workflows."
 echo "  5. Manually trigger a Cloud Scheduler run once to confirm end-to-end delivery:"
 echo "     gcloud scheduler jobs run job-pipeline-6h --location=$REGION"
