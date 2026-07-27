@@ -166,6 +166,19 @@ gcloud run services add-iam-policy-binding job-pipeline-n8n \
   --member="serviceAccount:job-pipeline-scheduler@$GCP_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/run.invoker"
 
+echo "== Granting the operator (you) access to open the n8n UI =="
+# The service is intentionally not public — Cloud Scheduler reaches it via
+# the service account above. To actually open the n8n UI yourself (import
+# workflows, set up credentials) you need run.invoker too, via
+# `gcloud run services proxy` + Cloud Shell Web Preview. Defaults to
+# whichever account gcloud is currently authenticated as; override with
+# OPERATOR_EMAIL=someone@else.com if deploying on someone else's behalf.
+OPERATOR_EMAIL="${OPERATOR_EMAIL:-$(gcloud config get-value account 2>/dev/null)}"
+gcloud run services add-iam-policy-binding job-pipeline-n8n \
+  --region="$REGION" \
+  --member="user:$OPERATOR_EMAIL" \
+  --role="roles/run.invoker"
+
 gcloud scheduler jobs create http job-pipeline-6h \
   --location="$REGION" \
   --schedule="0 */6 * * *" \
