@@ -1,0 +1,69 @@
+{
+  "name": "Ingestion - ATS (Greenhouse/Lever/Ashby)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-1",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, ats_type, identifier, name AS company_name FROM company_sources WHERE active = true AND ats_type IN ('greenhouse', 'lever', 'ashby');"
+      },
+      "id": "pg-sources",
+      "name": "Load active ATS sources",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": { "postgres": { "id": "job-db", "name": "Job Pipeline Postgres" } }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-1",
+      "name": "One company at a time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.ats_type === 'greenhouse' ? `https://boards-api.greenhouse.io/v1/boards/${$json.identifier}/jobs?content=true` : $json.ats_type === 'lever' ? `https://api.lever.co/v0/postings/${$json.identifier}?mode=json` : `https://api.ashbyhq.com/posting-api/job-board/${$json.identifier}` }}",
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "http-ats",
+      "name": "Fetch board (Greenhouse/Lever/Ashby)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalizes whichever ATS shape came back into the common job schema.\n// See n8n/code-nodes/normalize.mjs for the tested standalone version this\n// mirrors — keep the two in sync by hand (n8n Code nodes can't import files).\nfunction stripHtml(html) {\n  if (!html) return '';\n  const decode = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '\"').replace(/&#39;/g, \"'\").replace(/&nbsp;/g, ' ');\n  let text = decode(html);\n  text = text.replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, '').replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n  return decode(text);\n}\n\nconst source = $('Load active ATS sources').item.json;\nconst body = $input.item.json;\nconst results = [];\n\nif (source.ats_type === 'greenhouse' && Array.isArray(body.jobs)) {\n  for (const job of body.jobs) {\n    results.push({\n      company: source.company_name,\n      title: job.title,\n      url: job.absolute_url,\n      location: job.location?.name || 'Remote/Unspecified',\n      comp_text: '',\n      posted_at: job.updated_at || null,\n      description: stripHtml(job.content),\n      source_platform: 'greenhouse',\n    });\n  }\n} else if (source.ats_type === 'lever' && Array.isArray(body)) {\n  for (const job of body) {\n    results.push({\n      company: source.company_name,\n      title: job.text,\n      url: job.hostedUrl,\n      location: job.categories?.location || 'Remote/Unspecified',\n      comp_text: job.salaryRange ? `${job.salaryRange.min ?? ''}-${job.salaryRange.max ?? ''} ${job.salaryRange.currency ?? ''}`.trim() : '',\n      posted_at: job.createdAt ? new Date(job.createdAt).toISOString() : null,\n      description: stripHtml(job.descriptionPlain || job.description),\n      source_platform: 'lever',\n    });\n  }\n} else if (source.ats_type === 'ashby' && Array.isArray(body.jobs)) {\n  for (const job of body.jobs) {\n    results.push({\n      company: source.company_name,\n      title: job.title,\n      url: job.jobUrl,\n      location: job.locationName || 'Remote/Unspecified',\n      comp_text: job.compensation?.summary || '',\n      posted_at: job.publishedAt || null,\n      description: stripHtml(job.descriptionPlain || job.description),\n      source_platform: 'ashby',\n    });\n  }\n}\n\nreturn results.map((r) => ({ json: r }));"
+      },
+      "id": "normalize-ats",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "When Called": { "main": [[{ "node": "Load active ATS sources", "type": "main", "index": 0 }]] },
+    "Load active ATS sources": { "main": [[{ "node": "One company at a time", "type": "main", "index": 0 }]] },
+    "One company at a time": { "main": [[{ "node": "Fetch board (Greenhouse/Lever/Ashby)", "type": "main", "index": 0 }]] },
+    "Fetch board (Greenhouse/Lever/Ashby)": { "main": [[{ "node": "Normalize", "type": "main", "index": 0 }]] },
+    "Normalize": { "main": [[{ "node": "One company at a time", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}

@@ -1,0 +1,40 @@
+{
+  "name": "Ingestion - Manual Inbox",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-1",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, url, note FROM manual_inbox WHERE processed = false;"
+      },
+      "id": "pg-inbox",
+      "name": "Load unprocessed manual URLs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": { "postgres": { "id": "job-db", "name": "Job Pipeline Postgres" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Manual entries carry no title/company/description yet — extraction is\n// the responsibility of the evaluate-job sub-workflow (Playwright/WebFetch\n// against the pasted URL), same as career-ops' pipeline.md URL inbox.\nreturn [{\n  json: {\n    company: '',\n    title: '',\n    url: $input.item.json.url,\n    location: '',\n    comp_text: '',\n    posted_at: null,\n    description: '',\n    source_platform: 'manual_inbox',\n    manual_inbox_id: $input.item.json.id,\n    note: $input.item.json.note || '',\n  }\n}];"
+      },
+      "id": "normalize-manual",
+      "name": "Normalize (pass-through)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "When Called": { "main": [[{ "node": "Load unprocessed manual URLs", "type": "main", "index": 0 }]] },
+    "Load unprocessed manual URLs": { "main": [[{ "node": "Normalize (pass-through)", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}

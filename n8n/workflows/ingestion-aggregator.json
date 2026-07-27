@@ -1,0 +1,63 @@
+{
+  "name": "Ingestion - Aggregator API (Adzuna)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-1",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.adzuna.com/v1/api/jobs/us/search/1",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "app_id", "value": "={{ $credentials.adzunaApi.appId }}" },
+            { "name": "app_key", "value": "={{ $credentials.adzunaApi.appKey }}" },
+            { "name": "results_per_page", "value": "50" },
+            { "name": "what", "value": "software engineer OR software developer OR .net developer OR fullstack engineer" },
+            { "name": "max_days_old", "value": "1" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 15000, "response": { "response": { "neverError": true } } }
+      },
+      "id": "http-adzuna",
+      "name": "Adzuna search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "results",
+        "options": {}
+      },
+      "id": "split-results",
+      "name": "Split results",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "function stripHtml(html) {\n  if (!html) return '';\n  return html.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n}\nconst job = $input.item.json;\nreturn [{\n  json: {\n    company: job.company?.display_name || 'Unknown',\n    title: job.title,\n    url: job.redirect_url,\n    location: job.location?.display_name || 'Remote/Unspecified',\n    comp_text: (job.salary_min || job.salary_max) ? `${job.salary_min ?? ''}-${job.salary_max ?? ''}` : '',\n    posted_at: job.created || null,\n    description: stripHtml(job.description),\n    source_platform: 'aggregator_adzuna',\n  }\n}];"
+      },
+      "id": "normalize-aggregator",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    }
+  ],
+  "connections": {
+    "When Called": { "main": [[{ "node": "Adzuna search", "type": "main", "index": 0 }]] },
+    "Adzuna search": { "main": [[{ "node": "Split results", "type": "main", "index": 0 }]] },
+    "Split results": { "main": [[{ "node": "Normalize", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}

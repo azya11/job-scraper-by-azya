@@ -1,0 +1,146 @@
+{
+  "name": "Job Pipeline - Main Orchestrator (every 6h via Cloud Scheduler)",
+  "nodes": [
+    {
+      "parameters": { "httpMethod": "POST", "path": "run-job-pipeline" },
+      "id": "webhook-1",
+      "name": "Cloud Scheduler webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The system prompt is built once at deploy time from the candidate's\n// real profile.yml (scripts: node prompts/build-prompt.mjs profile.yml)\n// and stored as the EVAL_SYSTEM_PROMPT env var / secret — n8n's Code node\n// has no filesystem access to profile.yml on Cloud Run, so it is never\n// re-read here per run.\nreturn [{ json: { system_prompt: $env.EVAL_SYSTEM_PROMPT || '' } }];"
+      },
+      "id": "load-prompt",
+      "name": "Load system prompt (once)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 200]
+    },
+    {
+      "parameters": { "workflowId": "ingestion-ats" },
+      "id": "exec-ats",
+      "name": "Ingest: Greenhouse/Lever/Ashby",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [440, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": { "workflowId": "ingestion-aggregator" },
+      "id": "exec-aggregator",
+      "name": "Ingest: Aggregator API",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [440, 200],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": { "workflowId": "ingestion-manual-inbox" },
+      "id": "exec-manual",
+      "name": "Ingest: Manual inbox",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [440, 400],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": { "mode": "combine", "combinationMode": "multiplex" },
+      "id": "merge-1",
+      "name": "Merge all sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [660, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const TARGET_ROLE_PATTERN = /(software\\s*(developer|engineer)|backend\\s*(developer|engineer)|full[\\s-]?stack\\s*(developer|engineer)|\\.net\\s*(developer|engineer)|ml\\s*engineer|machine\\s*learning\\s*engineer|ai\\s*engineer)/i;\nfunction isTargetRole(title, description) {\n  if (TARGET_ROLE_PATTERN.test(title || '')) return true;\n  if (/^(engineer|swe|developer)\\b/i.test((title || '').trim())) return TARGET_ROLE_PATTERN.test(description || '');\n  return false;\n}\nconst job = $input.item.json;\n// Manual-inbox entries are user-curated by definition — never keyword-gated.\nif (job.source_platform === 'manual_inbox') return [{ json: job }];\nif (!isTargetRole(job.title, job.description)) return [];\nreturn [{ json: job }];"
+      },
+      "id": "keyword-filter",
+      "name": "Keyword gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nfunction canonicalUrl(url) {\n  try { const u = new URL(url); u.search=''; u.hash=''; let s=u.toString().toLowerCase(); if (s.endsWith('/')) s=s.slice(0,-1); return s; } catch { return String(url).split('?')[0].toLowerCase().trim(); }\n}\nconst job = $input.item.json;\nconst hash = crypto.createHash('sha256').update(canonicalUrl(job.url)).digest('hex');\nreturn [{ json: { ...job, job_hash: hash } }];"
+      },
+      "id": "compute-hash",
+      "name": "Compute job_hash",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT 1 FROM job_evaluations WHERE job_hash = '{{ $json.job_hash }}';"
+      },
+      "id": "pg-dedup-check",
+      "name": "Already evaluated?",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 200],
+      "credentials": { "postgres": { "id": "job-db", "name": "Job Pipeline Postgres" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "leftValue": "={{ $json.isEmpty() }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true" } }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-new",
+      "name": "Is new? (0 rows = new)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": { "batchSize": 1, "options": {} },
+      "id": "split-jobs",
+      "name": "One job at a time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1760, 100]
+    },
+    {
+      "parameters": { "workflowId": "evaluate-job" },
+      "id": "exec-evaluate",
+      "name": "Evaluate + persist + alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1980, 100],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Cloud Scheduler webhook": { "main": [[{ "node": "Load system prompt (once)", "type": "main", "index": 0 }]] },
+    "Load system prompt (once)": {
+      "main": [
+        [
+          { "node": "Ingest: Greenhouse/Lever/Ashby", "type": "main", "index": 0 },
+          { "node": "Ingest: Aggregator API", "type": "main", "index": 0 },
+          { "node": "Ingest: Manual inbox", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Ingest: Greenhouse/Lever/Ashby": { "main": [[{ "node": "Merge all sources", "type": "main", "index": 0 }]] },
+    "Ingest: Aggregator API": { "main": [[{ "node": "Merge all sources", "type": "main", "index": 1 }]] },
+    "Ingest: Manual inbox": { "main": [[{ "node": "Merge all sources", "type": "main", "index": 2 }]] },
+    "Merge all sources": { "main": [[{ "node": "Keyword gate", "type": "main", "index": 0 }]] },
+    "Keyword gate": { "main": [[{ "node": "Compute job_hash", "type": "main", "index": 0 }]] },
+    "Compute job_hash": { "main": [[{ "node": "Already evaluated?", "type": "main", "index": 0 }]] },
+    "Already evaluated?": { "main": [[{ "node": "Is new? (0 rows = new)", "type": "main", "index": 0 }]] },
+    "Is new? (0 rows = new)": { "main": [[{ "node": "One job at a time", "type": "main", "index": 0 }], []] },
+    "One job at a time": { "main": [[{ "node": "Evaluate + persist + alert", "type": "main", "index": 0 }]] },
+    "Evaluate + persist + alert": { "main": [[{ "node": "One job at a time", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}
