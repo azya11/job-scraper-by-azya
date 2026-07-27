@@ -90,6 +90,52 @@ async function main() {
   }
   console.log("  job_hash computation: OK (sha256, 64 hex chars)");
 
+  console.log("=== Validating Telegram HTML escaping in evaluate-job.json against an adversarial job ===");
+  const evalWorkflow = JSON.parse(readFileSync(new URL("../n8n/workflows/evaluate-job.json", import.meta.url)));
+  const parseResultNode = getNode(evalWorkflow, "Parse Claude result");
+  const maliciousJob = {
+    company: '<a href="http://evil.example/phish">Acme</a>',
+    title: "<script>alert(1)</script> Software Engineer",
+    location: "Remote",
+    url: "https://example.com/job/1",
+    description: "irrelevant",
+  };
+  const claudeResponse = {
+    content: [
+      {
+        text: JSON.stringify({
+          archetype: "Software Engineer",
+          global_score: 4.2,
+          match_cv_score: 4,
+          match_cv_notes: "ok",
+          north_star_score: 4,
+          north_star_notes: "ok",
+          comp_score: 4,
+          comp_notes: "ok",
+          cultural_score: 4,
+          cultural_notes: "ok",
+          red_flags_score: 5,
+          red_flags_notes: "ok",
+          posting_legitimacy: "high_confidence",
+          posting_legitimacy_notes: "ok",
+          recommend_apply: true,
+        }),
+      },
+    ],
+  };
+  const parsed = runCodeNode(parseResultNode.parameters.jsCode, {
+    inputItem: claudeResponse,
+    namedNodes: { "When Called (one job)": maliciousJob },
+  });
+  const cardHtml = parsed[0].json.telegram_card_html;
+  if (cardHtml.includes("<a href=") || cardHtml.includes("<script>")) {
+    throw new Error("HTML injection NOT escaped in telegram_card_html: " + cardHtml);
+  }
+  if (!cardHtml.includes("&lt;a href=") || !cardHtml.includes("&lt;script&gt;")) {
+    throw new Error("Expected escaped entities not found in telegram_card_html: " + cardHtml);
+  }
+  console.log("  Malicious company/title correctly HTML-escaped in the Telegram card, no live tags survived.");
+
   console.log("\nAll inline n8n Code node logic validated against live data + edge cases.");
 }
 
