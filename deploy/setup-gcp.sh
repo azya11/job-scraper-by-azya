@@ -29,11 +29,14 @@ gcloud services enable \
   iam.googleapis.com
 
 echo "== Provisioning Cloud SQL (Postgres) =="
-gcloud sql instances create job-pipeline-db \
-  --database-version=POSTGRES_15 \
-  --cpu=1 --memory=3840MiB \
-  --region="$REGION" \
-  --tier=db-custom-1-3840 || echo "(instance may already exist, continuing)"
+if gcloud sql instances describe job-pipeline-db >/dev/null 2>&1; then
+  echo "(instance job-pipeline-db already exists, skipping create)"
+else
+  gcloud sql instances create job-pipeline-db \
+    --database-version=POSTGRES_15 \
+    --region="$REGION" \
+    --tier=db-custom-1-3840
+fi
 
 gcloud sql users set-password postgres \
   --instance=job-pipeline-db \
