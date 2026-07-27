@@ -128,11 +128,18 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --condition=None >/dev/null
 
 echo "== Deploying n8n to Cloud Run (pass 1: get the assigned URL) =="
+# --no-cpu-throttling is required, not optional: Cloud Run's default
+# behavior throttles CPU to near-zero between HTTP requests, but n8n runs a
+# continuous background DB keepalive/ping loop regardless of request
+# activity. Under default throttling that loop starves, producing a
+# ping-fail -> reconnect -> ping-fail -> crash loop that looks like a DB
+# permissions problem but isn't one.
 gcloud run deploy job-pipeline-n8n \
   --image=docker.io/n8nio/n8n:latest \
   --region="$REGION" \
   --platform=managed \
   --no-allow-unauthenticated \
+  --no-cpu-throttling \
   --min-instances=0 \
   --max-instances=1 \
   --port=5678 \
