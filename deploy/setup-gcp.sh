@@ -92,6 +92,17 @@ fi
 node "$REPO_ROOT/prompts/build-prompt.mjs" "$PROFILE_PATH" > /tmp/system_prompt.txt
 create_or_update_secret eval-system-prompt "$(cat /tmp/system_prompt.txt)"
 
+echo "== Granting Cloud Run's runtime service account access to the secrets =="
+# Cloud Run pulls secret values as the project's default compute service
+# account at deploy time — it has no Secret Manager access by default, so
+# the deploy fails with "Permission denied on secret" until this is granted.
+PROJECT_NUMBER=$(gcloud projects describe "$GCP_PROJECT_ID" --format='value(projectNumber)')
+COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$COMPUTE_SA" \
+  --role="roles/secretmanager.secretAccessor" \
+  --condition=None >/dev/null
+
 echo "== Deploying n8n to Cloud Run =="
 gcloud run deploy job-pipeline-n8n \
   --image=docker.io/n8nio/n8n:latest \
